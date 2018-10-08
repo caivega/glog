@@ -98,16 +98,18 @@ type severity int32 // sync/atomic int32
 // A message written to a high-severity log file is also written to each
 // lower-severity log file.
 const (
-	infoLog severity = iota
+	debugLog severity = iota
+	infoLog
 	warningLog
 	errorLog
 	fatalLog
-	numSeverity = 4
+	numSeverity = 5
 )
 
-const severityChar = "IWEF"
+const severityChar = "DIWEF"
 
 var severityName = []string{
+	debugLog:   "DEBUG",
 	infoLog:    "INFO",
 	warningLog: "WARNING",
 	errorLog:   "ERROR",
@@ -180,13 +182,15 @@ func (s *OutputStats) Bytes() int64 {
 // Stats tracks the number of lines of output and number of bytes
 // per severity level. Values must be read with atomic.LoadInt64.
 var Stats struct {
-	Info, Warning, Error OutputStats
+	Debug, Info, Warning, Error, Fatal OutputStats
 }
 
 var severityStats = [numSeverity]*OutputStats{
+	debugLog:   &Stats.Debug,
 	infoLog:    &Stats.Info,
 	warningLog: &Stats.Warning,
 	errorLog:   &Stats.Error,
+	fatalLog:   &Stats.Fatal,
 }
 
 // Level is exported because it appears in the arguments to V and is
@@ -396,15 +400,15 @@ type flushSyncWriter interface {
 }
 
 func init() {
-	flag.BoolVar(&logging.toStderr, "logtostderr", false, "log to standard error instead of files")
-	flag.BoolVar(&logging.alsoToStderr, "alsologtostderr", false, "log to standard error as well as files")
-	flag.Var(&logging.verbosity, "v", "log level for V logs")
-	flag.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
-	flag.Var(&logging.vmodule, "vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
-	flag.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
+	// flag.BoolVar(&logging.toStderr, "log_to_stderr", false, "log to standard error instead of files")
+	// flag.BoolVar(&logging.alsoToStderr, "log_to_file", false, "log to standard error as well as files")
+	flag.Var(&logging.verbosity, "log_level", "log level for V logs")
+	// flag.Var(&logging.stderrThreshold, "log_stderr_threshold", "logs at or above this threshold go to stderr")
+	// flag.Var(&logging.vmodule, "log_vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
+	// flag.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
 
-	// Default stderrThreshold is ERROR.
-	logging.stderrThreshold = errorLog
+	// Default stderrThreshold is INFO.
+	logging.stderrThreshold = infoLog
 
 	logging.setVState(0, nil, false)
 	go logging.flushDaemon()
@@ -703,6 +707,9 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 			fallthrough
 		case infoLog:
 			l.file[infoLog].Write(data)
+			fallthrough
+		case debugLog:
+			l.file[debugLog].Write(data)
 		}
 	}
 	if s == fatalLog {
@@ -722,7 +729,7 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 		// Write the stack trace for all goroutines to the files.
 		trace := stacks(true)
 		logExitFunc = func(error) {} // If we get a write error, we'll still exit below.
-		for log := fatalLog; log >= infoLog; log-- {
+		for log := fatalLog; log >= debugLog; log-- {
 			if f := l.file[log]; f != nil { // Can be nil if -logtostderr is set.
 				f.Write(trace)
 			}
@@ -862,7 +869,7 @@ func (l *loggingT) createFiles(sev severity) error {
 	now := time.Now()
 	// Files are created in decreasing severity order, so as soon as we find one
 	// has already been created, we can stop.
-	for s := sev; s >= infoLog && l.file[s] == nil; s-- {
+	for s := sev; s >= debugLog && l.file[s] == nil; s-- {
 		sb := &syncBuffer{
 			logger: l,
 			sev:    s,
@@ -895,7 +902,7 @@ func (l *loggingT) lockAndFlushAll() {
 // l.mu is held.
 func (l *loggingT) flushAll() {
 	// Flush from fatal down, in case there's trouble flushing.
-	for s := fatalLog; s >= infoLog; s-- {
+	for s := fatalLog; s >= debugLog; s-- {
 		file := l.file[s]
 		if file != nil {
 			file.Flush() // ignore error
@@ -909,7 +916,7 @@ func (l *loggingT) flushAll() {
 // severities.  Subsequent changes to the standard log's default output location
 // or format may break this behavior.
 //
-// Valid names are "INFO", "WARNING", "ERROR", and "FATAL".  If the name is not
+// Valid names are "DEBUG", "INFO", "WARNING", "ERROR", and "FATAL".  If the name is not
 // recognized, CopyStandardLogTo panics.
 func CopyStandardLogTo(name string) {
 	sev, ok := severityByName(name)
@@ -1023,6 +1030,54 @@ func V(level Level) Verbose {
 		return Verbose(v >= level)
 	}
 	return Verbose(false)
+}
+
+// Debug is equivalent to the global Debug function, guarded by the value of v.
+// See the documentation of V for usage.
+func (v Verbose) Debug(args ...interface{}) {
+	if v {
+		logging.print(debugLog, args...)
+	}
+}
+
+// Debugln is equivalent to the global Infoln function, guarded by the value of v.
+// See the documentation of V for usage.
+func (v Verbose) Debugln(args ...interface{}) {
+	if v {
+		logging.println(debugLog, args...)
+	}
+}
+
+// Debugf is equivalent to the global Debugf function, guarded by the value of v.
+// See the documentation of V for usage.
+func (v Verbose) Debugf(format string, args ...interface{}) {
+	if v {
+		logging.printf(debugLog, format, args...)
+	}
+}
+
+// Debug logs to the DEBUG log.
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func Debug(args ...interface{}) {
+	logging.print(debugLog, args...)
+}
+
+// DebugDepth acts as Debug but uses depth to determine which call frame to log.
+// DebugDepth(0, "msg") is the same as Debug("msg").
+func DebugDepth(depth int, args ...interface{}) {
+	logging.printDepth(debugLog, depth, args...)
+}
+
+// Debugln logs to the DEBUG log.
+// Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
+func Debugln(args ...interface{}) {
+	logging.println(debugLog, args...)
+}
+
+// Debugf logs to the DEBUG log.
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func Debugf(format string, args ...interface{}) {
+	logging.printf(debugLog, format, args...)
 }
 
 // Info is equivalent to the global Info function, guarded by the value of v.
